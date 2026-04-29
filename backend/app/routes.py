@@ -3,7 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
-from flask import Blueprint, current_app, jsonify, request, send_file, send_from_directory
+from flask import (
+    Blueprint,
+    current_app,
+    jsonify,
+    request,
+    send_file,
+    send_from_directory,
+    session,
+)
 from werkzeug.utils import secure_filename
 
 from .db import get_db
@@ -20,6 +28,12 @@ OBJECTIVE = (
 )
 
 
+def _require_login():
+    if "user_id" not in session:
+        return jsonify({"error": "Login required."}), 401
+    return None
+
+
 @api.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
@@ -30,8 +44,51 @@ def objective():
     return jsonify({"objective": OBJECTIVE})
 
 
+@api.route("/session", methods=["GET"])
+def session_status():
+    return jsonify(
+        {
+            "authenticated": "user_id" in session,
+            "username": session.get("username"),
+        }
+    )
+
+
+@api.route("/login", methods=["POST"])
+def login():
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+
+    if not username or not password:
+        return jsonify({"error": "Username and password are required."}), 400
+
+    db = get_db()
+    user = db.execute(
+        "SELECT id, username, password_hash FROM users WHERE username = ?",
+        (username,),
+    ).fetchone()
+
+    if user is None or user["password_hash"] != password:
+        return jsonify({"error": "Invalid username or password."}), 401
+
+    session["user_id"] = user["id"]
+    session["username"] = user["username"]
+    return jsonify({"authenticated": True, "username": user["username"]})
+
+
+@api.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return jsonify({"authenticated": False})
+
+
 @api.route("/accounts", methods=["GET"])
 def accounts():
+    auth_error = _require_login()
+    if auth_error:
+        return auth_error
+
     db = get_db()
     rows = db.execute("SELECT id, name FROM accounts ORDER BY name").fetchall()
     return jsonify([dict(row) for row in rows])
@@ -39,6 +96,10 @@ def accounts():
 
 @api.route("/dealerships", methods=["GET"])
 def dealerships():
+    auth_error = _require_login()
+    if auth_error:
+        return auth_error
+
     account_id = request.args.get("account_id", type=int)
     db = get_db()
 
@@ -65,6 +126,10 @@ def dealerships():
 
 @api.route("/asset-file/<path:asset_path>", methods=["GET"])
 def asset_file(asset_path: str):
+    auth_error = _require_login()
+    if auth_error:
+        return auth_error
+
     assets_dir = current_app.config["ASSETS_DIR"].resolve()
     requested_path = (assets_dir / asset_path).resolve()
     if assets_dir not in requested_path.parents and requested_path != assets_dir:
@@ -76,6 +141,10 @@ def asset_file(asset_path: str):
 
 @api.route("/assets/logos", methods=["GET"])
 def logos():
+    auth_error = _require_login()
+    if auth_error:
+        return auth_error
+
     db = get_db()
     rows = db.execute(
         "SELECT id, type, name, file_path FROM assets WHERE type = 'logo' ORDER BY name"
@@ -87,6 +156,10 @@ def logos():
 def generate():
     if request.method == "OPTIONS":
         return ("", 204)
+
+    auth_error = _require_login()
+    if auth_error:
+        return auth_error
 
     account_id = request.form.get("account_id", type=int)
     dealership_ids = request.form.getlist("dealership_ids")
@@ -187,6 +260,10 @@ def generate():
 
 @api.route("/downloads/<job_id>/zip", methods=["GET"])
 def download_zip(job_id: str):
+    auth_error = _require_login()
+    if auth_error:
+        return auth_error
+
     db = get_db()
     row = db.execute("SELECT zip_path FROM generation_jobs WHERE job_id = ?", (job_id,)).fetchone()
     if row is None:
@@ -196,6 +273,10 @@ def download_zip(job_id: str):
 
 @api.route("/downloads/<job_id>/file/<filename>", methods=["GET"])
 def download_file(job_id: str, filename: str):
+    auth_error = _require_login()
+    if auth_error:
+        return auth_error
+
     path = current_app.config["GENERATED_FOLDER"] / job_id / filename
     if not path.exists():
         return jsonify({"error": "File not found."}), 404
@@ -204,6 +285,10 @@ def download_file(job_id: str, filename: str):
 
 @api.route("/previews/<job_id>/file/<filename>", methods=["GET"])
 def preview_file(job_id: str, filename: str):
+    auth_error = _require_login()
+    if auth_error:
+        return auth_error
+
     path = current_app.config["GENERATED_FOLDER"] / job_id / filename
     if not path.exists():
         return jsonify({"error": "File not found."}), 404

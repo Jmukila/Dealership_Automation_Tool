@@ -18,6 +18,7 @@ DEFAULT_LAYOUT = {
     "logo_width_ratio": 0.15,
     "top_padding_ratio": 0.04,
     "side_padding_ratio": 0.04,
+    "background_focus_x": 0.5,
     "background_focus_y": 0.42,
 }
 
@@ -41,6 +42,7 @@ DEALERSHIP_LAYOUTS = {
         "logo_width_ratio": 0.12,
         "top_padding_ratio": 0.03,
         "side_padding_ratio": 0.03,
+        "story_preserve_full_background": True,
         "background_focus_y": 0.46,
     },
 }
@@ -73,7 +75,7 @@ def generate_creatives(
 
         for format_key in selected_formats:
             width, height = OUTPUT_FORMATS[format_key]
-            canvas = _build_canvas(background, panel, logo, width, height, layout)
+            canvas = _build_canvas(background, panel, logo, width, height, layout, format_key)
             filename = f"{dealership['name']}_{format_key}.png".replace(" ", "_")
             output_path = job_dir / filename
             canvas.convert("RGB").save(output_path, quality=95)
@@ -103,9 +105,21 @@ def _build_canvas(
     width: int,
     height: int,
     layout: dict,
+    format_key: str,
 ):
     footer_ratio = _footer_ratio(panel)
-    canvas = _smart_cover(background, width, height, layout["background_focus_y"], footer_ratio)
+    focus_x = layout.get(f"{format_key}_background_focus_x", layout["background_focus_x"])
+    if layout.get(f"{format_key}_preserve_full_background", False):
+        canvas = _fit_full_background(background, width, height, focus_x, layout["background_focus_y"], footer_ratio)
+    else:
+        canvas = _smart_cover(
+            background,
+            width,
+            height,
+            focus_x,
+            layout["background_focus_y"],
+            footer_ratio,
+        )
 
     if panel:
         panel_overlay = _scale_overlay(panel, width)
@@ -120,7 +134,14 @@ def _build_canvas(
     return canvas
 
 
-def _smart_cover(image: Image.Image, width: int, height: int, focus_y: float, footer_ratio: float):
+def _smart_cover(
+    image: Image.Image,
+    width: int,
+    height: int,
+    focus_x: float,
+    focus_y: float,
+    footer_ratio: float,
+):
     source_ratio = image.width / image.height
     target_ratio = width / height
 
@@ -133,13 +154,40 @@ def _smart_cover(image: Image.Image, width: int, height: int, focus_y: float, fo
     max_left = max(resized.width - width, 0)
     max_top = max(resized.height - height, 0)
 
-    left = max_left // 2
+    safe_focus_x = min(max(focus_x, 0.0), 1.0)
+    left = int((resized.width * safe_focus_x) - (width * 0.5))
+    left = min(max(left, 0), max_left)
 
     safe_focus_y = min(max(focus_y - (footer_ratio * 0.25), 0.15), 0.85)
     top = int((resized.height * safe_focus_y) - (height * 0.5))
     top = min(max(top, 0), max_top)
 
     return resized.crop((left, top, left + width, top + height))
+
+
+def _fit_full_background(
+    image: Image.Image,
+    width: int,
+    height: int,
+    focus_x: float,
+    focus_y: float,
+    footer_ratio: float,
+):
+    scale = width / image.width
+    fitted_height = int(image.height * scale)
+    fitted = image.resize((width, fitted_height), Image.LANCZOS)
+
+    canvas = Image.new("RGBA", (width, height), fitted.getpixel((width // 2, fitted_height - 1)))
+    canvas.alpha_composite(fitted, (0, 0))
+
+    remaining_height = height - fitted_height
+    if remaining_height > 0:
+        strip_height = min(max(fitted_height // 4, 1), fitted_height)
+        bottom_strip = fitted.crop((0, fitted_height - strip_height, width, fitted_height))
+        extension = bottom_strip.resize((width, remaining_height), Image.LANCZOS)
+        canvas.alpha_composite(extension, (0, fitted_height))
+
+    return canvas
 
 
 def _scale_overlay(panel: Image.Image, canvas_width: int):
